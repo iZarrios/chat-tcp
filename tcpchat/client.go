@@ -15,6 +15,7 @@ type Client struct {
 }
 
 // equivalent of ReadLoop() in simple tcp
+// read what the user input is then, send it to the server
 func (c *Client) ReadLoop() {
 	for {
 		msg, err := bufio.NewReader(c.Conn).ReadString('\n')
@@ -57,10 +58,14 @@ func (c *Client) ReadLoop() {
 				Client: c,
 				Args:   args,
 			}
-			// c.SendToClient("Cya!")
-			// c.Conn.Close()
 		default:
-			c.SendToClient(fmt.Sprintf("Unknown cmd: %v\n", cmd))
+			c.Cmds <- Cmd{
+				ID:     CMD_ERROR,
+				Client: c,
+				Args:   args,
+			}
+			// local cmds checker
+			c.SendMsgToClient(fmt.Sprintf("INTERNAL:Unknown cmd: %v", cmd))
 			continue
 
 		}
@@ -68,7 +73,7 @@ func (c *Client) ReadLoop() {
 
 }
 
-func (c *Client) SendToClient(msg string) error {
+func (c *Client) SendMsgToClient(msg string) error {
 	_, err := c.Conn.Write([]byte("> " + msg))
 	return err
 }
