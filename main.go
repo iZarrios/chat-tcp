@@ -1,10 +1,7 @@
 package main
 
-import (
-	"github.com/iZarrios/custom-tcp/tcpchat"
-)
+import "github.com/iZarrios/chat-tcp/tcpchat"
 
 func main() {
-	// tcp.Tcp()
 	tcpchat.Tcpchat()
 }
