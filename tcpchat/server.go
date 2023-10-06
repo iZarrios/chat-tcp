@@ -1,31 +1,64 @@
 package tcpchat
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 )
 
 type Server struct {
-	listenAddress string
+	ListenAddress string
 	ln            net.Listener
 	Rooms         map[string]*Room
 	Cmds          chan Cmd
 	quitChannel   chan struct{}
 }
 
-func NewServer(listenAddress string) *Server {
-	return &Server{
-		listenAddress: listenAddress,
+type ServerOption func(*Server)
+
+func WithAddress(listenAddress string) ServerOption {
+	return func(s *Server) {
+		s.ListenAddress = listenAddress
+	}
+}
+
+func WithCmdBufferSize(bufferSize int) ServerOption {
+	return func(s *Server) {
+		if s.Cmds != nil {
+			close(s.Cmds)
+		}
+
+		s.Cmds = make(chan Cmd, bufferSize)
+	}
+}
+
+func NewServer(opts ...ServerOption) *Server {
+	const (
+		defaultBufferSize    = 1
+		defaultListenAddress = ":3000"
+		defaultRoomWatcher   = ""
+	)
+	server := &Server{
+		ListenAddress: defaultListenAddress,
 		Rooms:         make(map[string]*Room),
-		Cmds:          make(chan Cmd), //TODO: make it buffered?
+		Cmds:          make(chan Cmd, defaultBufferSize),
 		quitChannel:   make(chan struct{}),
 	}
 
+	// Loop through each option
+	for _, opt := range opts {
+		opt(server)
+	}
+	return server
 }
+
 func (s *Server) Start() error {
-	ln, err := net.Listen("tcp", s.listenAddress)
+	ln, err := net.Listen("tcp", s.ListenAddress)
 	if err != nil {
 		return err
 	}
@@ -37,15 +70,24 @@ func (s *Server) Start() error {
 
 	go s.RunCmd()
 
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c // to make it unblocking
+		s.quitChannel <- struct{}{}
+		os.Exit(1)
+	}()
+
 	<-s.quitChannel
 
 	return nil
 
 }
 
-func (s *Server) AcceptLoop() error {
+func (s *Server) AcceptLoop() {
 	for {
 		conn, err := s.ln.Accept()
+
 		if err != nil {
 			fmt.Printf("Could not accept %v: %v \n",
 				conn.RemoteAddr().String(), err)
@@ -54,14 +96,13 @@ func (s *Server) AcceptLoop() error {
 		// read or init client
 		c := s.NewClient(conn)
 		go c.ReadLoop()
-
 		fmt.Printf("%v Connected\n", conn.RemoteAddr())
 
 	}
 }
 
 func (s *Server) NewClient(conn net.Conn) *Client {
-	fmt.Printf("%v has Connected Successfully\n", conn.RemoteAddr().String())
+	// fmt.Printf("%v has Connected Successfully\n", conn.RemoteAddr().String())
 	c := &Client{
 		Conn: conn,
 		Nick: "anon",
@@ -81,32 +122,41 @@ func (s *Server) RunCmd() {
 			s.changeNickname(cmd.Client, cmd.Args)
 		case CMD_ROOMS:
 			if len(s.Rooms) == 0 {
-				s.SendMsgToClient(*cmd.Client, "Look like there are no rooms available u can /join NEW_ROOM_NAME and it will get created!\n")
+				s.SendMsgToClient(cmd.Client, []byte("Look like there are no rooms available u can /join NEW_ROOM_NAME and it will get created!\n"))
 			}
 			for k, r := range s.Rooms {
-				s.SendMsgToClient(*cmd.Client, fmt.Sprintf("%v | %v | %v Members\n",
-					k, r.Name, len(r.Members)))
+				var buf bytes.Buffer
+				_, err := fmt.Fprintf(&buf, "%4v|%4v|%4vMembers\n", k, r.Name, len(r.Members))
+
+				if err != nil {
+					panic("Writing into buf when trying to RunCmd failed")
+				}
+
+				s.SendMsgToClient(cmd.Client, buf.Bytes())
 			}
 		case CMD_MSG:
 			if cmd.Client.Room != nil {
 				s.SendMsgToRoom(cmd.Client, cmd.Args)
 			} else {
-				s.SendMsgToClient(*cmd.Client, "You need to join a room first try /rooms\n")
+				s.SendMsgToClient(cmd.Client, []byte("You need to join a room first try /rooms\n"))
 			}
 		case CMD_QUIT:
 			s.QuitChatApp(cmd.Client)
 		case CMD_ERROR:
-			fmt.Println("Cmd Error format")
-			s.BadCmd(*cmd.Client, cmd.Args[0])
+			fmt.Print(RED)
+			fmt.Printf("[ERROR] Cmd Error format from %v(%v)\n", cmd.Client.Nick, cmd.Client.Conn.RemoteAddr().String())
+			fmt.Print(RESET)
+			s.BadCmd(cmd.Client, cmd.Args[0])
 		default:
 			fmt.Print("default in server?\n")
 
 		}
 	}
 }
+
 func (s *Server) join(c *Client, args []string) {
 	if len(args) != 2 {
-		c.SendMsgToClient("room name is required. usage: /join ROOM_NAME")
+		c.SendMsgToClient([]byte("room name is required. usage: /join ROOM_NAME"))
 		return
 	}
 
@@ -125,38 +175,48 @@ func (s *Server) join(c *Client, args []string) {
 	s.QuitCurrentRoom(c)
 	c.Room = r
 
-	r.Broadcast(c, fmt.Sprintf("%s joined the room", c.Nick))
+	r.Broadcast(c, []byte(fmt.Sprintf("%s joined the room", c.Nick)))
 
-	c.SendMsgToClient(fmt.Sprintf("welcome to %s\n", roomName))
+	c.SendMsgToClient([]byte(fmt.Sprintf("welcome to %s\n", roomName)))
 }
 
 func (s *Server) changeNickname(c *Client, args []string) {
 	if len(args) == 2 {
-		c.Room.Broadcast(c, fmt.Sprintf("%v has been changed his nicknames into %v", c.Nick, args[1]))
+		c.Room.Broadcast(c, []byte(fmt.Sprintf("%v has been changed his nicknames into %v", c.Nick, args[1])))
 
-		s.SendMsgToClient(*c, fmt.Sprintf("Successfully changed Nick into %v\n", args[1]))
+		s.SendMsgToClient(c, []byte(fmt.Sprintf("Successfully changed Nick into %v\n", args[1])))
 		c.Nick = args[1]
 		return
 	}
-	s.BadCmd(*c, args[0])
+	s.BadCmd(c, args[0])
 
 }
+
 func (s *Server) SendMsgToRoom(c *Client, args []string) {
 	if len(args) < 2 {
-		c.SendMsgToClient("message is required, usage: /msg MSG\n")
+		c.SendMsgToClient([]byte("message is required, usage: /msg MSG\n"))
 		return
 	}
 
-	msg := strings.Join(args[1:], " ")
-	c.Room.Broadcast(c, c.Nick+": "+msg)
+	var buf bytes.Buffer
+	buf.WriteString(c.Nick)
+	buf.WriteString(": ")
+	buf.WriteString(strings.Join(args[1:], " "))
+	c.Room.Broadcast(c, buf.Bytes())
 }
 
-func (s *Server) BadCmd(c Client, cmdName string) {
-	s.SendMsgToClient(c, fmt.Sprintf("Unknown cmd: %v\n", cmdName))
+func (s *Server) BadCmd(c *Client, cmdName string) {
+	var buf bytes.Buffer
+	buf.WriteString("Unknown cmd: ")
+	buf.WriteString(cmdName)
+	buf.WriteRune('\n')
+	s.SendMsgToClient(c, buf.Bytes())
+
+	log.Printf(buf.String())
 
 }
 
-func (s *Server) SendMsgToClient(c Client, msg string) {
+func (s *Server) SendMsgToClient(c *Client, msg []byte) {
 	_, err := c.Conn.Write([]byte(msg))
 
 	if err != nil {
@@ -168,15 +228,22 @@ func (s *Server) QuitCurrentRoom(c *Client) {
 	if c.Room != nil {
 		oldRoom := s.Rooms[c.Room.Name]
 		delete(s.Rooms[c.Room.Name].Members, c.Conn.RemoteAddr())
-		oldRoom.Broadcast(c, fmt.Sprintf("%s has left the room", c.Nick))
+		var buf bytes.Buffer
+		buf.WriteString(c.Nick)
+		buf.WriteString(" has left the room")
+		oldRoom.Broadcast(c, buf.Bytes())
+		// deleting room if there are no members in the room
+		if len(s.Rooms[c.Room.Name].Members) == 0 {
+			delete(s.Rooms, oldRoom.Name)
+		}
 	}
 }
 
 func (s *Server) QuitChatApp(c *Client) {
-	log.Printf("client has left the chat: %s\n", c.Conn.RemoteAddr().String())
+	fmt.Printf("client has left the chat: %s\n", c.Conn.RemoteAddr().String())
 
 	s.QuitCurrentRoom(c)
 
-	c.SendMsgToClient("See you soon!\n")
+	c.SendMsgToClient([]byte("See you soon!\n"))
 	c.Conn.Close()
 }
