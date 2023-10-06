@@ -7,10 +7,11 @@ type Room struct {
 	Members map[net.Addr]*Client
 }
 
-func (r *Room) Broadcast(sender *Client, msg string) {
-	for addr, m := range r.Members {
+func (r *Room) Broadcast(sender *Client, msg []byte) {
+	for addr, subscriber := range r.Members {
 		if sender.Conn.RemoteAddr() != addr {
-			m.SendMsgToClient(msg + "\n")
+			msg = append(msg, '\n')
+			subscriber.SendMsgToClient(msg)
 		}
 	}
 }

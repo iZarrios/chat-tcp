@@ -2,7 +2,7 @@ package tcpchat
 
 import (
 	"bufio"
-	"fmt"
+	"bytes"
 	"net"
 	"strings"
 )
@@ -18,14 +18,15 @@ type Client struct {
 // read what the user input is then, send it to the server
 func (c *Client) ReadLoop() {
 	for {
-		msg, err := bufio.NewReader(c.Conn).ReadString('\n')
+		rdr := bufio.NewReader(c.Conn)
+		msg, err := rdr.ReadString('\n')
 		if err != nil {
 			return
 		}
 		msg = strings.Trim(msg, "\r\n")
 
 		args := strings.Split(msg, " ")
-		cmd := strings.TrimSpace(args[0]) // Cmd should be first token
+		cmd := strings.TrimSpace(args[0]) // cmd should be first token
 
 		switch cmd {
 		case "/join":
@@ -58,6 +59,8 @@ func (c *Client) ReadLoop() {
 				Client: c,
 				Args:   args,
 			}
+		case "":
+			continue
 		default:
 			c.Cmds <- Cmd{
 				ID:     CMD_ERROR,
@@ -65,15 +68,23 @@ func (c *Client) ReadLoop() {
 				Args:   args,
 			}
 			// local cmds checker
-			c.SendMsgToClient(fmt.Sprintf("INTERNAL:Unknown cmd: %v", cmd))
-			continue
+			var buf bytes.Buffer
+			buf.WriteString("INTERNAL: Unknown cmd: ")
+			buf.WriteString(cmd)
+			buf.WriteString("\n")
 
+			// Get the message as a byte slice
+			msgBytes := buf.Bytes()
+
+			c.SendMsgToClient(msgBytes)
 		}
 	}
-
 }
 
-func (c *Client) SendMsgToClient(msg string) error {
-	_, err := c.Conn.Write([]byte("> " + msg))
+func (c *Client) SendMsgToClient(msg []byte) error {
+	var buf bytes.Buffer
+	buf.WriteString("> ")
+	buf.Write(msg)
+	_, err := c.Conn.Write(buf.Bytes())
 	return err
 }
