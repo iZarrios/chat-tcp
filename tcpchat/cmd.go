@@ -10,6 +10,10 @@ const (
 	CMD_QUIT
 	CMD_ERROR
 )
+const (
+	RED   = "\033[31m"
+	RESET = "\033[0m"
+)
 
 type CmdID int
 
